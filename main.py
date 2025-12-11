@@ -17,8 +17,8 @@ L = 4.0
 H = 6.0
 
 # Mesh più leggera per velocizzare
-NX_NL = 10
-NY_NL = 20
+NX_NL = 15
+NY_NL = 30
 
 TARGET_DISP_MM = 15.0
 
