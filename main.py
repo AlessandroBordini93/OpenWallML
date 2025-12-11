@@ -1,4 +1,7 @@
 # main.py
+# Servizio FastAPI per pushover muratura (Existing + Project)
+# Usa OpenSeesPy J2Plasticity, restituisce solo curva forza-spostamento.
+
 import io
 import contextlib
 from typing import Any, Dict, List, Tuple, Union
@@ -16,7 +19,7 @@ import openseespy.opensees as ops
 L = 4.0
 H = 6.0
 
-# Mesh più leggera per velocizzare
+# Mesh "light" di default (puoi sovrascriverla via query ?nx=..&ny=..)
 NX_NL = 15
 NY_NL = 30
 
@@ -35,7 +38,11 @@ PIER_MIN = 0.30  # maschio orizzontale minimo
 #  FUNZIONI GEOMETRIA
 # ============================================================
 
-def inside_opening(x: float, y: float, openings: List[Tuple[float, float, float, float]]) -> bool:
+def inside_opening(
+    x: float,
+    y: float,
+    openings: List[Tuple[float, float, float, float]]
+) -> bool:
     """True se il punto (x,y) è dentro una delle aperture (solo interno, NON il bordo)."""
     for (x1, x2, y1, y2) in openings:
         if (x > x1) and (x < x2) and (y > y1) and (y < y2):
@@ -238,9 +245,11 @@ def build_wall_J2(openings, nx: int, ny: int):
     return node_tags, control_node
 
 
-def shear_at_target_disp(disp_mm: np.ndarray,
-                         shear_kN: np.ndarray,
-                         target_mm: float = TARGET_DISP_MM) -> Union[float, None]:
+def shear_at_target_disp(
+    disp_mm: np.ndarray,
+    shear_kN: np.ndarray,
+    target_mm: float = TARGET_DISP_MM
+) -> Union[float, None]:
     """
     Interpola il taglio alla base alla deformata target_mm.
     Restituisce None se la curva non arriva a target_mm.
@@ -257,13 +266,15 @@ def shear_at_target_disp(disp_mm: np.ndarray,
 #  ANALISI PUSHOVER (SOLO CURVA)
 # ============================================================
 
-def run_pushover_nonlinear(openings,
-                           nx: int = NX_NL,
-                           ny: int = NY_NL,
-                           target_mm: float = TARGET_DISP_MM,
-                           max_steps: int = 100,
-                           dU: float = 0.0002,
-                           verbose: bool = False) -> Dict[str, Any]:
+def run_pushover_nonlinear(
+    openings,
+    nx: int = NX_NL,
+    ny: int = NY_NL,
+    target_mm: float = TARGET_DISP_MM,
+    max_steps: int = 60,
+    dU: float = 0.0005,
+    verbose: bool = False
+) -> Dict[str, Any]:
     """
     Esegue pushover non lineare J2.
     Restituisce:
@@ -385,7 +396,11 @@ def run_pushover_nonlinear(openings,
 #  FUNZIONE ALTO LIVELLO: EXISTING + PROJECT
 # ============================================================
 
-def run_two_cases_from_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+def run_two_cases_from_dict(
+    data: Dict[str, Any],
+    nx: int = NX_NL,
+    ny: int = NY_NL
+) -> Dict[str, Any]:
     """
     data deve contenere:
       {
@@ -401,8 +416,8 @@ def run_two_cases_from_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     if not project_openings:
         raise ValueError("Chiave 'project_openings' mancante o vuota.")
 
-    res_existing = run_pushover_nonlinear(existing_openings)
-    res_project  = run_pushover_nonlinear(project_openings)
+    res_existing = run_pushover_nonlinear(existing_openings, nx=nx, ny=ny)
+    res_project  = run_pushover_nonlinear(project_openings, nx=nx, ny=ny)
 
     return {
         "existing": res_existing,
@@ -432,12 +447,24 @@ async def pushover_endpoint(request: Request):
     Endpoint principale.
     Accetta JSON nel formato:
       - [{ "existing_openings": [...], "project_openings": [...] }]
-        (come n8n/Lovable nel tuo caso)
       - oppure { "existing_openings": [...], "project_openings": [...] }
+
+    Puoi opzionalmente passare la mesh via query:
+      /pushover?nx=15&ny=30
     """
+    # leggo query params nx, ny (se non ci sono uso valori default)
+    try:
+        nx = int(request.query_params.get("nx", NX_NL))
+        ny = int(request.query_params.get("ny", NY_NL))
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "nx e ny devono essere interi"}
+        )
+
     payload = await request.json()
 
-    # gestisce sia lista che dict
+    # gestisce sia lista che dict (n8n spesso manda una lista di item)
     if isinstance(payload, list):
         if not payload:
             return JSONResponse(
@@ -447,7 +474,7 @@ async def pushover_endpoint(request: Request):
         payload = payload[0]
 
     try:
-        result = run_two_cases_from_dict(payload)
+        result = run_two_cases_from_dict(payload, nx=nx, ny=ny)
         return JSONResponse(content=result)
     except Exception as e:
         return JSONResponse(
