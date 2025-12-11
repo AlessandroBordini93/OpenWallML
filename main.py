@@ -1,7 +1,6 @@
 # main.py
 import io
 import contextlib
-import json
 from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
@@ -17,8 +16,9 @@ import openseespy.opensees as ops
 L = 4.0
 H = 6.0
 
-NX_NL = 50
-NY_NL = 100
+# Mesh più leggera per velocizzare
+NX_NL = 30
+NY_NL = 60
 
 TARGET_DISP_MM = 15.0
 
@@ -254,166 +254,16 @@ def shear_at_target_disp(disp_mm: np.ndarray,
 
 
 # ============================================================
-#  STRESS PROFILES (TAU / SIGMA)
-# ============================================================
-
-def _compute_stress_grid_profiles(
-    n_bins_x: int = 4,
-    n_bins_y: int = 12
-) -> Dict[str, Any]:
-    """
-    Legge le tensioni nel CURRENT state di OpenSees (ultimo step analisi)
-    e costruisce:
-      - un profilo verticale medio di tau e sigma_c
-      - una griglia 2D di zone con tau/sigma.
-    """
-    ele_tags = ops.getEleTags()
-    if not ele_tags:
-        return {
-            "tau_profile_y":  {"y": [], "tau_mean": []},
-            "sigma_profile_y":{"y": [], "sigma_c_mean": []},
-            "zones": []
-        }
-
-    y_edges = np.linspace(0.0, H, n_bins_y + 1)
-    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
-    x_edges = np.linspace(0.0, L, n_bins_x + 1)
-
-    tau_sum_y   = np.zeros(n_bins_y)
-    tau_count_y = np.zeros(n_bins_y)
-    sigc_sum_y  = np.zeros(n_bins_y)
-    sigc_count_y= np.zeros(n_bins_y)
-
-    tau_max_2d  = np.full((n_bins_x, n_bins_y), -1e20)
-    tau_sum_2d  = np.zeros((n_bins_x, n_bins_y))
-    tau_count_2d= np.zeros((n_bins_x, n_bins_y))
-    sigc_max_2d = np.full((n_bins_x, n_bins_y), -1e20)
-
-    for ele in ele_tags:
-        stress = ops.eleResponse(ele, 'stress')
-        if stress is None:
-            continue
-
-        tau_vals  = []
-        sigy_vals = []
-
-        for i in range(0, len(stress), 3):
-            sigx = stress[i]
-            sigy = stress[i+1]
-            tau  = stress[i+2]
-            tau_vals.append(abs(tau))
-            sigy_vals.append(sigy)
-
-        if not tau_vals or not sigy_vals:
-            continue
-
-        tau_max_el  = max(tau_vals)
-        tau_mean_el = sum(tau_vals) / len(tau_vals)
-
-        sigy_min = min(sigy_vals)      # più compressa (negativa)
-        sigma_c_el = abs(sigy_min)
-
-        node_tags = ops.eleNodes(ele)
-        xs, ys = [], []
-        for nd in node_tags:
-            x_nd, y_nd = ops.nodeCoord(nd)
-            xs.append(x_nd)
-            ys.append(y_nd)
-        if not xs or not ys:
-            continue
-        xc = sum(xs) / len(xs)
-        yc = sum(ys) / len(ys)
-
-        # profilo verticale
-        j = int(np.searchsorted(y_edges, yc) - 1)
-        if j < 0 or j >= n_bins_y:
-            continue
-
-        tau_sum_y[j]   += tau_mean_el
-        tau_count_y[j] += 1
-
-        sigc_sum_y[j]   += sigma_c_el
-        sigc_count_y[j] += 1
-
-        # griglia 2D
-        i = int(np.searchsorted(x_edges, xc) - 1)
-        if i < 0 or i >= n_bins_x:
-            continue
-
-        if tau_max_el > tau_max_2d[i, j]:
-            tau_max_2d[i, j] = tau_max_el
-
-        tau_sum_2d[i, j]  += tau_mean_el
-        tau_count_2d[i, j]+= 1
-
-        if sigma_c_el > sigc_max_2d[i, j]:
-            sigc_max_2d[i, j] = sigma_c_el
-
-    # profili 1D
-    y_out = []
-    tau_mean_y = []
-    for j in range(n_bins_y):
-        if tau_count_y[j] > 0:
-            y_out.append(float(y_centers[j]))
-            tau_mean_y.append(float(tau_sum_y[j] / tau_count_y[j]))
-
-    y_sig_out = []
-    sigc_mean_y = []
-    for j in range(n_bins_y):
-        if sigc_count_y[j] > 0:
-            y_sig_out.append(float(y_centers[j]))
-            sigc_mean_y.append(float(sigc_sum_y[j] / sigc_count_y[j]))
-
-    # griglia 2D
-    zones = []
-    for i in range(n_bins_x):
-        for j in range(n_bins_y):
-            if tau_count_2d[i, j] <= 0:
-                continue
-
-            x_min = float(x_edges[i])
-            x_max = float(x_edges[i+1])
-            y_min = float(y_edges[j])
-            y_max = float(y_edges[j+1])
-
-            tau_mean_zone = float(tau_sum_2d[i, j] / tau_count_2d[i, j])
-            tau_max_zone  = float(tau_max_2d[i, j]) if tau_max_2d[i, j] > -1e10 else 0.0
-            sigma_c_zone  = float(sigc_max_2d[i, j]) if sigc_max_2d[i, j] > -1e10 else 0.0
-
-            zones.append({
-                "id": f"z_{i}_{j}",
-                "x_range": [x_min, x_max],
-                "y_range": [y_min, y_max],
-                "tau_max": tau_max_zone,
-                "tau_mean": tau_mean_zone,
-                "sigma_c_max": sigma_c_zone
-            })
-
-    return {
-        "tau_profile_y": {
-            "y": y_out,
-            "tau_mean": tau_mean_y
-        },
-        "sigma_profile_y": {
-            "y": y_sig_out,
-            "sigma_c_mean": sigc_mean_y
-        },
-        "zones": zones
-    }
-
-
-# ============================================================
-#  ANALISI PUSHOVER
+#  ANALISI PUSHOVER (SOLO CURVA)
 # ============================================================
 
 def run_pushover_nonlinear(openings,
                            nx: int = NX_NL,
                            ny: int = NY_NL,
                            target_mm: float = TARGET_DISP_MM,
-                           max_steps: int = 140,
+                           max_steps: int = 100,
                            dU: float = 0.0002,
-                           verbose: bool = False,
-                           compute_stress_profiles: bool = True) -> Dict[str, Any]:
+                           verbose: bool = False) -> Dict[str, Any]:
     """
     Esegue pushover non lineare J2.
     Restituisce:
@@ -422,26 +272,18 @@ def run_pushover_nonlinear(openings,
         "message": str o None,
         "disp_mm": [...],
         "shear_kN": [...],
-        "V_target": float o None,
-        "stress_profiles": {...}
+        "V_target": float o None
       }
     """
     try:
         if not openings_valid(openings, CORDOLI_Y, MARGIN):
-            base_dict = {
+            return {
                 "status": "error",
                 "message": "openings_invalid",
                 "disp_mm": [],
                 "shear_kN": [],
                 "V_target": None
             }
-            if compute_stress_profiles:
-                base_dict["stress_profiles"] = {
-                    "tau_profile_y": {"y": [], "tau_mean": []},
-                    "sigma_profile_y": {"y": [], "sigma_c_mean": []},
-                    "zones": []
-                }
-            return base_dict
 
         node_tags, control_node = build_wall_J2(openings, nx, ny)
 
@@ -509,24 +351,17 @@ def run_pushover_nonlinear(openings,
         shear_arr = np.array(shear_kN, dtype=float)
 
         if j2_problem or lin_problem:
-            base_dict = {
+            return {
                 "status": "error",
                 "message": "analysis_not_converged",
                 "disp_mm": disp_arr.tolist(),
                 "shear_kN": shear_arr.tolist(),
                 "V_target": None
             }
-            if compute_stress_profiles:
-                base_dict["stress_profiles"] = {
-                    "tau_profile_y": {"y": [], "tau_mean": []},
-                    "sigma_profile_y": {"y": [], "sigma_c_mean": []},
-                    "zones": []
-                }
-            return base_dict
 
         V_target = shear_at_target_disp(disp_arr, shear_arr, target_mm)
 
-        result: Dict[str, Any] = {
+        return {
             "status": "ok",
             "message": None,
             "disp_mm": disp_arr.tolist(),
@@ -534,32 +369,16 @@ def run_pushover_nonlinear(openings,
             "V_target": V_target
         }
 
-        if compute_stress_profiles:
-            stress_prof = _compute_stress_grid_profiles(
-                n_bins_x=4,
-                n_bins_y=12
-            )
-            result["stress_profiles"] = stress_prof
-
-        return result
-
     except Exception as e:
         if verbose:
             print(f"[run_pushover_nonlinear] errore: {e}")
-        base_dict = {
+        return {
             "status": "error",
             "message": str(e),
             "disp_mm": [],
             "shear_kN": [],
             "V_target": None
         }
-        if compute_stress_profiles:
-            base_dict["stress_profiles"] = {
-                "tau_profile_y": {"y": [], "tau_mean": []},
-                "sigma_profile_y": {"y": [], "sigma_c_mean": []},
-                "zones": []
-            }
-        return base_dict
 
 
 # ============================================================
@@ -595,14 +414,16 @@ def run_two_cases_from_dict(data: Dict[str, Any]) -> Dict[str, Any]:
 #  FASTAPI APP
 # ============================================================
 
-app = FastAPI(title="Wall Pushover Service",
-              description="Servizio pushover muratura (Existing + Project) per n8n/Lovable",
-              version="1.0.0")
+app = FastAPI(
+    title="Wall Pushover Service (Light)",
+    description="Servizio pushover muratura (Existing + Project) – solo curva forza-spostamento",
+    version="1.0.0"
+)
 
 
 @app.get("/")
 def read_root():
-    return {"status": "ok", "message": "Wall Pushover Service attivo"}
+    return {"status": "ok", "message": "Wall Pushover Service (light) attivo"}
 
 
 @app.post("/pushover")
