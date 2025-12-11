@@ -1,4 +1,4 @@
 fastapi
 uvicorn[standard]
 numpy
-openseespy
+openseespy==3.4.0.1
